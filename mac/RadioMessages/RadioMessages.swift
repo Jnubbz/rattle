@@ -38,6 +38,7 @@ final class Model: ObservableObject {
 	private var buffer = Data()
 	private var lastError = ""
 	private var stopping = false
+	private var testMode = false
 	private var alarm: NSSound?
 	private var activity: NSObjectProtocol?
 
@@ -74,6 +75,12 @@ final class Model: ObservableObject {
 		p.executableURL = exe
 		p.arguments = ["listen", "--config", configURL.path, "--format", "json",
 		               "--no-audio-s", "15", "--log", logURL.path]
+		// Test hook: decode a recording instead of the radio (used by the build's screenshot test).
+		if let wav = ProcessInfo.processInfo.environment["RADIO_MESSAGES_TEST_WAV"] {
+			p.arguments = ["listen", "--config", configURL.path, "--format", "json", "--wav", wav]
+			testMode = true
+			status = .listening
+		}
 		p.currentDirectoryURL = supportDir
 		let pipe = Pipe()
 		p.standardOutput = pipe
@@ -103,7 +110,7 @@ final class Model: ObservableObject {
 
 	private func receiverExited() {
 		process = nil
-		if stopping { return }
+		if stopping || testMode { return }
 		status = .problem(lastError.isEmpty ? "Lost contact with the radio." : lastError)
 		scheduleRestart()
 	}

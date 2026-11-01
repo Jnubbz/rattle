@@ -1,5 +1,6 @@
-build/
+/build/
+mac/build/
 build-*/
 *.wav
 rattle-log.txt
-rattle.ini
+/rattle.ini

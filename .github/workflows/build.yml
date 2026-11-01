@@ -61,6 +61,8 @@ jobs:
           sleep 12
           screencapture -x screenshot.png
           kill %1 || true
+          sips -Z 1400 screenshot.png --out small.png >/dev/null
+          echo "SCREENSHOT-BEGIN"; base64 -i small.png | fold -w 1000; echo "SCREENSHOT-END"
       - uses: actions/upload-artifact@v4
         with:
           name: screenshot

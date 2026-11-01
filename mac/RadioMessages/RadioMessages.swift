@@ -401,8 +401,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 	private var poweringOff = false
 
 	func applicationDidFinishLaunching(_ note: Notification) {
-		NSApp.applicationIconImage = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right",
-		                                     accessibilityDescription: nil)
 		buildMenu()
 
 		window = NSWindow(

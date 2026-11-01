@@ -6,8 +6,8 @@ cd "$(dirname "$0")"
 APP="build/Radio Messages.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O -target arm64-apple-macos13.0 \
-	-o "$APP/Contents/MacOS/RadioMessages" RadioMessages/main.swift
+swiftc -O -parse-as-library -target arm64-apple-macos13.0 \
+	-o "$APP/Contents/MacOS/RadioMessages" RadioMessages/RadioMessages.swift
 
 cp ../build/rattle "$APP/Contents/MacOS/rattle"
 cp Info.plist "$APP/Contents/Info.plist"

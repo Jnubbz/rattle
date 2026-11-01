@@ -1,0 +1,33 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x64,  exe: build/Release/rattle.exe }
+          - { os: macos-latest,   name: macos-arm64,  exe: build/rattle }
+          - { os: ubuntu-latest,  name: linux-x64,    exe: build/rattle }
+          - { os: ubuntu-24.04-arm, name: linux-arm64-pi, exe: build/rattle }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release -j 4
+      - name: loopback test
+        shell: bash
+        run: |
+          ${{ matrix.exe }} send "loopback test de KN0BLE" --callsign KN0BLE --wav t.wav
+          ${{ matrix.exe }} listen --wav t.wav | grep "loopback test de KN0BLE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rattle-${{ matrix.name }}
+          path: |
+            ${{ matrix.exe }}
+            examples/
+            README.md

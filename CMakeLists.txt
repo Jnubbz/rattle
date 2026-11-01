@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.16)
+project(rattle CXX C)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+	set(CMAKE_BUILD_TYPE Release)
+endif()
+
+add_executable(rattle src/rattle.cpp)
+target_include_directories(rattle PRIVATE src third_party/rattlegram third_party/miniaudio)
+
+if(WIN32)
+	if(MINGW)
+		target_link_options(rattle PRIVATE -static)
+	endif()
+elseif(APPLE)
+	target_link_libraries(rattle PRIVATE "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox")
+else()
+	find_package(Threads REQUIRED)
+	target_link_libraries(rattle PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()

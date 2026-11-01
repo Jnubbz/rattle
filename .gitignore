@@ -1,0 +1,5 @@
+build/
+build-*/
+*.wav
+rattle-log.txt
+rattle.ini

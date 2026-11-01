@@ -65,6 +65,9 @@ struct Config {
 		{"log", ""},              // append received/sent messages to this file
 		{"on_message", ""},       // shell command run per received message; env RATTLE_FROM, RATTLE_TEXT, RATTLE_TIME
 		{"verbose", "false"},
+		{"format", "text"},       // text | json (one JSON object per line, for the Radio Messages app)
+		{"names", ""},            // display names, e.g. KN0BLE=Josh,W1AW=ARRL
+		{"no_audio_s", "0"},      // exit with an error if the input goes silent-dead this long (0 = never)
 	};
 
 	std::string get(const std::string &k) const {
@@ -140,6 +143,55 @@ static std::mutex g_out_mutex;
 static void say(const std::string &s) {
 	std::lock_guard<std::mutex> lk(g_out_mutex);
 	std::cout << s << std::endl;
+}
+
+static bool g_json = false;
+
+static std::string json_escape(const std::string &in) {
+	std::string o;
+	for (unsigned char c : in) {
+		switch (c) {
+			case '"': o += "\\\""; break;
+			case '\\': o += "\\\\"; break;
+			case '\n': o += "\\n"; break;
+			case '\r': o += "\\r"; break;
+			case '\t': o += "\\t"; break;
+			default:
+				if (c < 0x20) {
+					char b[8];
+					std::snprintf(b, sizeof b, "\\u%04x", c);
+					o += b;
+				} else
+					o += (char) c;
+		}
+	}
+	return o;
+}
+
+// emit({"event","message"},{"from","KN0BLE"},...) -> {"event":"message","from":"KN0BLE",...}
+static void emit(std::initializer_list<std::pair<const char *, std::string>> fields) {
+	std::string line = "{";
+	bool first = true;
+	for (auto &f : fields) {
+		if (!first) line += ",";
+		first = false;
+		line += "\"" + std::string(f.first) + "\":\"" + json_escape(f.second) + "\"";
+	}
+	line += "}";
+	say(line);
+}
+
+static std::string display_name(const Config &cfg, const std::string &call) {
+	std::stringstream ss(cfg.get("names"));
+	std::string item;
+	while (std::getline(ss, item, ',')) {
+		auto eq = item.find('=');
+		if (eq == std::string::npos) continue;
+		std::string c = Config::trim(item.substr(0, eq));
+		for (auto &ch : c) ch = (char) std::toupper((unsigned char) ch);
+		if (c == call) return Config::trim(item.substr(eq + 1));
+	}
+	return call;
 }
 
 static void log_line(const Config &cfg, const std::string &dir, const std::string &call, const std::string &text) {
@@ -369,7 +421,7 @@ private:
 		switch (status) {
 			case STATUS_SYNC: {
 				std::string from = staged_call();
-				if (verbose) {
+				if (verbose && !g_json) {
 					std::snprintf(buf, sizeof buf, "[%s] receiving from %s (mode %d, centre %.1f Hz)",
 						now_str().c_str(), from.c_str(), (int) mode, cfo);
 					say(buf);
@@ -380,7 +432,9 @@ private:
 				std::string from = cstr_trim(call, 9);
 				int flips = dec->fetch(payload);
 				if (flips < 0) {
-					say("[" + now_str() + "] " + from + ": decoding failed (signal too weak or distorted)");
+					if (g_json) emit({{"event", "failed"}, {"from", from}, {"name", display_name(cfg, from)}, {"time", now_str(true)}});
+					else say("[" + now_str() + "] " + from + ": decoding failed (signal too weak or distorted)");
+					log_line(cfg, "RX", from, "(could not decode)");
 					return 0;
 				}
 				std::string text = cstr_trim(payload, MAX_PAYLOAD);
@@ -389,25 +443,27 @@ private:
 					std::snprintf(buf, sizeof buf, "  (centre %.1f Hz, %d bits corrected)", cfo, flips);
 					line += buf;
 				}
-				say(line);
+				if (g_json) emit({{"event", "message"}, {"from", from}, {"name", display_name(cfg, from)}, {"text", text}, {"time", now_str(true)}});
+				else say(line);
 				log_line(cfg, "RX", from, text);
 				run_hook(cfg, from, text);
 				return 1;
 			}
 			case STATUS_PING: {
 				std::string from = staged_call();
-				say("[" + now_str() + "] ping from " + from);
+				if (g_json) emit({{"event", "ping"}, {"from", from}, {"name", display_name(cfg, from)}, {"time", now_str(true)}});
+				else say("[" + now_str() + "] ping from " + from);
 				log_line(cfg, "RX", from, "(ping)");
 				run_hook(cfg, from, "");
 				break;
 			}
 			case STATUS_NOPE: {
 				std::string from = staged_call();
-				say("[" + now_str() + "] " + from + ": unsupported mode " + std::to_string(mode));
+				if (!g_json) say("[" + now_str() + "] " + from + ": unsupported mode " + std::to_string(mode));
 				break;
 			}
 			case STATUS_FAIL:
-				if (verbose)
+				if (verbose && !g_json)
 					say("[" + now_str() + "] preamble failed");
 				break;
 			case STATUS_HEAP:
@@ -440,9 +496,11 @@ public:
 		if (ma_device_init(&audio.ctx, &dc, &cap) != MA_SUCCESS)
 			throw std::runtime_error("cannot open input device " + name);
 		cap_open = true;
+		started_ms = now_ms();
 		if (ma_device_start(&cap) != MA_SUCCESS)
 			throw std::runtime_error("cannot start input device " + name);
-		say("Listening on: " + name);
+		if (g_json) emit({{"event", "listening"}, {"device", name}});
+		else say("Listening on: " + name);
 	}
 
 	void stop_capture() {
@@ -551,6 +609,24 @@ private:
 	std::mutex cap_mutex;
 	std::vector<int16_t> cap_buf;
 	std::atomic<bool> muted{false};
+	std::atomic<long long> last_audio_ms{0};
+
+	static long long now_ms() {
+		return std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+
+public:
+	// Seconds since the input device last delivered audio (0 while transmitting).
+	double audio_silence_s() {
+		if (muted) return 0;
+		long long last = last_audio_ms;
+		if (!last) last = started_ms;
+		return (now_ms() - last) / 1000.0;
+	}
+	long long started_ms = now_ms();
+
+private:
 
 	std::vector<int16_t> *tx_audio = nullptr;
 	std::atomic<size_t> tx_pos{0};
@@ -561,6 +637,7 @@ private:
 		if (self->muted)
 			return;
 		auto *s = static_cast<const int16_t *>(in);
+		self->last_audio_ms = now_ms();
 		std::lock_guard<std::mutex> lk(self->cap_mutex);
 		if (self->cap_buf.size() < (size_t) RATE * 10) // never grow without bound
 			self->cap_buf.insert(self->cap_buf.end(), s, s + frames);
@@ -663,6 +740,8 @@ int main(int argc, char **argv) {
 		cfg.kv[kv.first] = kv.second;
 	}
 
+	g_json = lower(cfg.get("format")) == "json";
+
 	try {
 		if (command == "devices") {
 			Audio a;
@@ -714,7 +793,7 @@ int main(int argc, char **argv) {
 			return 0;
 		}
 
-		std::printf("rattle %s  callsign %s  ptt %s%s%s\n", VERSION, cfg.get("callsign").c_str(),
+		if (!g_json) std::printf("rattle %s  callsign %s  ptt %s%s%s\n", VERSION, cfg.get("callsign").c_str(),
 			cfg.get("ptt").c_str(), cfg.get("port").empty() ? "" : " on ", cfg.get("port").c_str());
 		st.start_capture();
 
@@ -751,16 +830,21 @@ int main(int argc, char **argv) {
 				}
 			}
 			st.poll();
+			double limit = cfg.getf("no_audio_s");
+			if (limit > 0 && st.audio_silence_s() > limit)
+				throw std::runtime_error("no audio from the input device (is the radio on and plugged in?)");
 			sleep_ms(20);
 		}
 		st.get_ptt().off();
 		g_ptt = nullptr;
-		std::printf("\nbye\n");
+		if (!g_json) std::printf("\nbye\n");
 		std::fflush(stdout);
 		std::_Exit(0); // the stdin reader thread may still be blocked in getline
 	} catch (const std::exception &e) {
 		if (g_ptt) g_ptt->off();
-		std::fprintf(stderr, "error: %s\n", e.what());
-		return 1;
+		if (g_json) emit({{"event", "error"}, {"message", e.what()}});
+		else std::fprintf(stderr, "error: %s\n", e.what());
+		std::fflush(stdout);
+		std::_Exit(1); // don't wait on a stuck audio device or the stdin thread
 	}
 }

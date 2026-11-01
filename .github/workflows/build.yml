@@ -32,3 +32,30 @@ jobs:
             ${{ matrix.exe }}
             examples/
             README.md
+
+  mac-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j 4
+      - run: mac/build-app.sh
+      - name: test bundled receiver (JSON events the app reads)
+        run: |
+          R="mac/build/Radio Messages.app/Contents/MacOS/rattle"
+          "$R" send "Radio Messages test" --callsign KN0BLE --wav t.wav
+          "$R" listen --wav t.wav --format json --names KN0BLE=Josh | tee out.json
+          grep '"event":"message","from":"KN0BLE","name":"Josh","text":"Radio Messages test"' out.json
+      - name: launch smoke test (app must stay running)
+        run: |
+          "mac/build/Radio Messages.app/Contents/MacOS/RadioMessages" > app.log 2>&1 &
+          PID=$!
+          sleep 10
+          kill -0 $PID && echo "app running after 10 s"
+          kill $PID || true
+          cat app.log
+      - name: package
+        run: cd mac/build && ditto -c -k --keepParent "Radio Messages.app" "Radio-Messages.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Radio-Messages-mac
+          path: mac/build/Radio-Messages.zip

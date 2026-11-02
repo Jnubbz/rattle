@@ -57,7 +57,7 @@ jobs:
         run: |
           R="mac/build/Radio Messages.app/Contents/MacOS/rattle"
           "$R" send "Truck broke down near Wekiwa Springs. I'm safe. Call Dad to pick me up at the main gate." --callsign KN0BLE --wav msg.wav
-          RADIO_MESSAGES_TEST_WAV="$PWD/msg.wav" "mac/build/Radio Messages.app/Contents/MacOS/RadioMessages" &
+          RADIO_MESSAGES_TEST_REPLY=1 RADIO_MESSAGES_TEST_WAV="$PWD/msg.wav" "mac/build/Radio Messages.app/Contents/MacOS/RadioMessages" &
           sleep 12
           screencapture -x screenshot.png
           kill %1 || true

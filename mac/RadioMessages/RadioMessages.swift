@@ -31,6 +31,11 @@ final class Model: ObservableObject {
 	@Published var messages: [RadioMessage] = []
 	@Published var status: Status = .starting
 	@Published var alerting = false
+	@Published var canSend = false
+	@Published var sending = false
+	@Published var sendError: String?
+	@Published var draft = ""
+	private var input: FileHandle?
 
 	var onAlert: (() -> Void)?
 
@@ -73,14 +78,19 @@ final class Model: ObservableObject {
 
 		let p = Process()
 		p.executableURL = exe
-		p.arguments = ["listen", "--config", configURL.path, "--format", "json",
+		// "chat" listens continuously and transmits each line written to its stdin.
+		p.arguments = ["chat", "--config", configURL.path, "--format", "json",
 		               "--no-audio-s", "15", "--log", logURL.path]
 		// Test hook: decode a recording instead of the radio (used by the build's screenshot test).
 		if let wav = ProcessInfo.processInfo.environment["RADIO_MESSAGES_TEST_WAV"] {
 			p.arguments = ["listen", "--config", configURL.path, "--format", "json", "--wav", wav]
 			testMode = true
 			status = .listening
+			canSend = ProcessInfo.processInfo.environment["RADIO_MESSAGES_TEST_REPLY"] != nil
 		}
+		let inPipe = Pipe()
+		p.standardInput = inPipe
+		input = inPipe.fileHandleForWriting
 		p.currentDirectoryURL = supportDir
 		let pipe = Pipe()
 		p.standardOutput = pipe
@@ -110,6 +120,9 @@ final class Model: ObservableObject {
 
 	private func receiverExited() {
 		process = nil
+		input = nil
+		if sending { sending = false; sendError = "The reply was not sent." }
+		if !testMode { canSend = false }
 		if stopping || testMode { return }
 		status = .problem(lastError.isEmpty ? "Lost contact with the radio." : lastError)
 		scheduleRestart()
@@ -138,6 +151,18 @@ final class Model: ObservableObject {
 		switch event {
 		case "listening":
 			status = .listening
+			canSend = f["can_send"] == "yes"
+		case "sending":
+			sending = true
+			sendError = nil
+		case "sent":
+			sending = false
+			draft = ""
+			messages.append(RadioMessage(time: Date(), from: "", name: "Home", text: f["text"] ?? "", kind: "sent"))
+			saveHistory()
+		case "send_error":
+			sending = false
+			sendError = "Reply not sent: " + (f["message"] ?? "unknown problem")
 		case "error":
 			lastError = friendly(f["message"] ?? "")
 		case "message":
@@ -173,6 +198,29 @@ final class Model: ObservableObject {
 		} else {
 			playAlarm(loop: false)
 		}
+	}
+
+	static let maxBytes = 170
+
+	var draftBytes: Int { cleaned(draft).utf8.count }
+
+	private func cleaned(_ t: String) -> String {
+		t.replacingOccurrences(of: "\r", with: " ")
+			.replacingOccurrences(of: "\n", with: " ")
+			.trimmingCharacters(in: .whitespaces)
+	}
+
+	func send() {
+		let text = cleaned(draft)
+		guard !text.isEmpty, text.utf8.count <= Model.maxBytes, !sending else { return }
+		guard let input else {
+			sendError = "Reply not sent: the radio isn't connected right now."
+			return
+		}
+		acknowledge()
+		sendError = nil
+		sending = true
+		input.write((text + "\n").data(using: .utf8)!)
 	}
 
 	func acknowledge() {
@@ -317,9 +365,62 @@ struct ContentView: View {
 					}
 				}
 			}
+
+			if model.canSend {
+				ReplyPanel(model: model)
+			}
 		}
 		.padding(24)
-		.frame(minWidth: 560, minHeight: 440)
+		.frame(minWidth: 600, minHeight: 520)
+	}
+}
+
+struct ReplyPanel: View {
+	@ObservedObject var model: Model
+
+	private let quick = ["Got your message.", "Everyone here is OK.", "Help is on the way.", "Call me when you can."]
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 10) {
+			Text("Reply by radio").font(.system(size: 18, weight: .semibold))
+
+			HStack(spacing: 8) {
+				ForEach(quick, id: \.self) { q in
+					Button(q) { model.draft = q }
+						.controlSize(.large)
+						.disabled(model.sending)
+				}
+			}
+
+			TextField("Type a reply…", text: $model.draft, axis: .vertical)
+				.font(.system(size: 20))
+				.lineLimit(2...4)
+				.textFieldStyle(.roundedBorder)
+				.disabled(model.sending)
+
+			HStack {
+				let n = model.draftBytes
+				Text("\(n) / \(Model.maxBytes)")
+					.font(.system(size: 14).monospacedDigit())
+					.foregroundStyle(n > Model.maxBytes ? .red : .secondary)
+				if let err = model.sendError {
+					Text(err).font(.system(size: 15)).foregroundStyle(.red)
+						.fixedSize(horizontal: false, vertical: true)
+				}
+				Spacer()
+				Button(action: model.send) {
+					Text(model.sending ? "Sending…" : "Send Reply")
+						.font(.system(size: 20, weight: .semibold))
+						.padding(.horizontal, 18)
+						.padding(.vertical, 6)
+				}
+				.buttonStyle(.borderedProminent)
+				.controlSize(.large)
+				.disabled(model.sending || n == 0 || n > Model.maxBytes)
+			}
+		}
+		.padding(14)
+		.background(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.3)))
 	}
 }
 
@@ -359,13 +460,18 @@ struct MessageRow: View {
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			Text("\(message.name)  ·  \(when)")
+			Text(message.kind == "sent" ? "Reply sent  ·  \(when)" : "\(message.name)  ·  \(when)")
 				.font(.system(size: 16, weight: .medium))
 				.foregroundStyle(.secondary)
 			switch message.kind {
 			case "message":
 				Text(message.text)
 					.font(.system(size: 30))
+					.textSelection(.enabled)
+					.fixedSize(horizontal: false, vertical: true)
+			case "sent":
+				Text(message.text)
+					.font(.system(size: 24))
 					.textSelection(.enabled)
 					.fixedSize(horizontal: false, vertical: true)
 			case "failed":
@@ -380,7 +486,8 @@ struct MessageRow: View {
 		}
 		.padding(16)
 		.frame(maxWidth: .infinity, alignment: .leading)
-		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+		.background(RoundedRectangle(cornerRadius: 12).fill(
+			message.kind == "sent" ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor)))
 	}
 
 	private var when: String {

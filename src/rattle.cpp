@@ -243,15 +243,19 @@ public:
 		mode = lower(cfg.get("ptt"));
 		if (mode != "none" && mode != "cat" && mode != "rts" && mode != "dtr")
 			throw std::runtime_error("ptt must be none, cat, rts or dtr");
-		if (mode != "none") {
-			if (cfg.get("port").empty())
-				throw std::runtime_error("ptt=" + mode + " needs port= (e.g. COM5 or /dev/cu.SLAB_USBtoUART)");
+		if (mode != "none" && cfg.get("port").empty())
+			throw std::runtime_error("ptt=" + mode + " needs port= (e.g. COM5 or /dev/cu.SLAB_USBtoUART)");
+	}
+
+	// Opens the serial port on first use, so a busy or missing port never stops receiving.
+	void prepare() {
+		if (mode != "none" && !port.is_open())
 			port.open(cfg.get("port"), cfg.geti("baud"));
-		}
 	}
 	~Ptt() { off(); }
 
 	void on() {
+		prepare();
 		keyed = true;
 		if (mode == "cat") port.write(cfg.get("cat_on"));
 		else if (mode == "rts") port.rts(true);
@@ -499,7 +503,7 @@ public:
 		started_ms = now_ms();
 		if (ma_device_start(&cap) != MA_SUCCESS)
 			throw std::runtime_error("cannot start input device " + name);
-		if (g_json) emit({{"event", "listening"}, {"device", name}});
+		if (g_json) emit({{"event", "listening"}, {"device", name}, {"can_send", ptt.keys_radio() ? "yes" : "no"}});
 		else say("Listening on: " + name);
 	}
 
@@ -524,8 +528,12 @@ public:
 
 	void transmit(const std::string &text) {
 		std::vector<int16_t> sig = encode_message(cfg, text);
-		if (!ptt.keys_radio())
+		if (!ptt.keys_radio()) {
+			if (g_json) throw std::runtime_error("sending is not set up (ptt = none)");
 			say("note: ptt=none, so the radio will not be keyed");
+		}
+		ptt.prepare(); // fail here, before touching audio, if the port can't be opened
+		if (g_json) emit({{"event", "sending"}, {"text", text}});
 
 		std::string name;
 		const ma_device_id *id = audio.find(ma_device_type_playback, cfg.get("output"), name);
@@ -574,9 +582,13 @@ public:
 		}
 		muted = false;
 
-		if (aborted)
-			say("[" + now_str() + "] TRANSMIT ABORTED (watchdog or Ctrl+C), radio unkeyed");
-		else {
+		if (aborted) {
+			if (g_json) emit({{"event", "send_error"}, {"message", "transmission stopped by the safety timer"}});
+			else say("[" + now_str() + "] TRANSMIT ABORTED (watchdog or Ctrl+C), radio unkeyed");
+		} else if (g_json) {
+			emit({{"event", "sent"}, {"text", text}, {"time", now_str(true)}});
+			log_line(cfg, "TX", cfg.get("callsign"), text.empty() ? "(ping)" : text);
+		} else {
 			char buf[64];
 			std::snprintf(buf, sizeof buf, " (%.1f s)", sig.size() / double(RATE));
 			say("[" + now_str() + "] sent as " + cfg.get("callsign") + ": " + (text.empty() ? "(ping)" : text) + buf);
@@ -800,7 +812,7 @@ int main(int argc, char **argv) {
 		std::mutex q_mutex;
 		std::deque<std::string> queue;
 		if (command == "chat") {
-			std::printf("Type a message and press Enter to send (max 170 bytes). Empty line = ping. Ctrl+C quits.\n");
+			if (!g_json) std::printf("Type a message and press Enter to send (max 170 bytes). Empty line = ping. Ctrl+C quits.\n");
 			std::thread([&] {
 				std::string line;
 				while (!g_quit && std::getline(std::cin, line)) {
@@ -808,6 +820,7 @@ int main(int argc, char **argv) {
 					std::lock_guard<std::mutex> lk(q_mutex);
 					queue.push_back(line);
 				}
+				if (g_json) g_quit = true; // the app that started us is gone
 			}).detach();
 		}
 
@@ -826,7 +839,8 @@ int main(int argc, char **argv) {
 				try {
 					st.transmit(msg);
 				} catch (const std::exception &e) {
-					say(std::string("error: ") + e.what());
+					if (g_json) emit({{"event", "send_error"}, {"message", e.what()}});
+					else say(std::string("error: ") + e.what());
 				}
 			}
 			st.poll();

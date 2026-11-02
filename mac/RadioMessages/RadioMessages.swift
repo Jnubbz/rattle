@@ -371,22 +371,28 @@ struct ContentView: View {
 			}
 		}
 		.padding(24)
-		.frame(minWidth: 600, minHeight: 520)
+		.frame(minWidth: 640, minHeight: 600)
 	}
 }
 
 struct ReplyPanel: View {
 	@ObservedObject var model: Model
 
-	private let quick = ["Got your message.", "Everyone here is OK.", "Help is on the way.", "Call me when you can."]
+	// Button label -> text it puts in the reply box.
+	private let quick: [(String, String)] = [
+		("Got it", "Got your message."),
+		("We're OK", "Everyone here is OK."),
+		("Help coming", "Help is on the way."),
+		("Call me", "Call me when you can."),
+	]
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 10) {
 			Text("Reply by radio").font(.system(size: 18, weight: .semibold))
 
 			HStack(spacing: 8) {
-				ForEach(quick, id: \.self) { q in
-					Button(q) { model.draft = q }
+				ForEach(quick, id: \.0) { q in
+					Button(q.0) { model.draft = q.1 }
 						.controlSize(.large)
 						.disabled(model.sending)
 				}
@@ -511,14 +517,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 		buildMenu()
 
 		window = NSWindow(
-			contentRect: NSRect(x: 0, y: 0, width: 640, height: 560),
+			contentRect: NSRect(x: 0, y: 0, width: 780, height: 780),
 			styleMask: [.titled, .closable, .miniaturizable, .resizable],
 			backing: .buffered, defer: false)
 		window.title = "Radio Messages"
 		window.isReleasedWhenClosed = false
 		window.contentView = NSHostingView(rootView: ContentView(model: model))
 		window.center()
-		window.setFrameAutosaveName("RadioMessagesWindow")
+		window.setFrameAutosaveName("RadioMessagesWindow3")
 		showWindow()
 
 		model.onAlert = { [weak self] in self?.showWindow() }
